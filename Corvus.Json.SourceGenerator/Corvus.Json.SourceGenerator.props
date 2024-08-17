@@ -8,5 +8,6 @@
     </ItemGroup>
 
     <PropertyGroup>
+        <CompilerVisibleItemMetadata Include="AdditionalFiles" MetadataName="CorvusSource" />
     </PropertyGroup>
 </Project>

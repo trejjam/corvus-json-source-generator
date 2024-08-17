@@ -2,7 +2,7 @@
 
 using Corvus.Json;
 
-[JsonSchemaTypeGenerator("../test.json")]
+[JsonSchemaTypeGenerator("https://corvus-oss.org/json-schema/2020-12/schema.json")]
 public readonly partial struct FlimFlam
 {
 }

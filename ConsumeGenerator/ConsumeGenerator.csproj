@@ -18,6 +18,6 @@
                           OutputItemType="Analyzer" />
     </ItemGroup>
     <ItemGroup>
-        <AdditionalFiles Include="test.json" />
+        <AdditionalFiles Include="test.json" CorvusSource="https://corvus-oss.org/json-schema/2020-12/schema.json" />
     </ItemGroup>
 </Project>
