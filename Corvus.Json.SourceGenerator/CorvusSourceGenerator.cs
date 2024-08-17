@@ -2,6 +2,8 @@
 // Copyright (c) Endjin Limited. All rights reserved.
 // </copyright>
 
+using H.Generators.Extensions;
+
 namespace Corvus.Json.SourceGenerator;
 
 using System;
@@ -30,6 +32,9 @@ public class CorvusSourceGenerator : IIncrementalGenerator
     private static readonly ImmutableArray<string> DefaultDisabledNamingHeuristics = ["DocumentationNameHeuristic"];
     private static readonly PrepopulatedDocumentResolver MetaSchemaResolver = CreateMetaSchemaResolver();
     private static readonly VocabularyRegistry VocabularyRegistry = RegisterVocabularies(MetaSchemaResolver);
+
+    private const string InlineSource = "CorvusSource";
+
     private static readonly DiagnosticDescriptor Crv1001ErrorGeneratingCSharpCode =
         new(id: "CRV1001",
             title: "JSON Schema Type Generator Error",
@@ -37,6 +42,7 @@ public class CorvusSourceGenerator : IIncrementalGenerator
             category: "JsonSchemaCodeGenerator",
             DiagnosticSeverity.Error,
             isEnabledByDefault: true);
+
     private static readonly DiagnosticDescriptor Crv1000ErrorAddingTypeDeclarations =
         new(id: "CRV1000",
             title: "JSON Schema Type Generator Error",
@@ -50,23 +56,48 @@ public class CorvusSourceGenerator : IIncrementalGenerator
     {
         EmitGeneratorAttribute(initializationContext);
 
-        IncrementalValueProvider<GlobalOptions> globalOptions = initializationContext.AnalyzerConfigOptionsProvider.Select(GetGlobalOptions);
+        IncrementalValueProvider<GlobalOptions> globalOptions =
+            initializationContext.AnalyzerConfigOptionsProvider.Select(GetGlobalOptions);
 
-        IncrementalValuesProvider<AdditionalText> jsonSourceFiles = initializationContext.AdditionalTextsProvider.Where(p => p.Path.EndsWith(".json"));
+        IncrementalValuesProvider<InlinedSource> jsonSourceFiles = initializationContext.AdditionalTextsProvider
+            .Where(p => p.Path.EndsWith(".json"))
+            .Combine(initializationContext.AnalyzerConfigOptionsProvider)
+            .Select((x, cancellationToken) =>
+            {
+                var (additionalText, configProvider) = x;
 
-        IncrementalValueProvider<CompoundDocumentResolver> documentResolver = jsonSourceFiles.Collect().Select(BuildDocumentResolver);
+                if (configProvider.GetOptions(additionalText).TryGetValue(InlineSource, out var inlineSource))
+                {
+                    return new InlinedSource(
+                        inlineSource,
+                        additionalText.GetText(cancellationToken)
+                    );
+                }
 
-        IncrementalValueProvider<GenerationContext> generationContext = documentResolver.Combine(globalOptions).Select((r, c) => new GenerationContext(r.Left, r.Right));
+                return null;
+            })
+            .Where(x => x?.Content != null);
+
+        IncrementalValueProvider<CompoundDocumentResolver> documentResolver =
+            jsonSourceFiles.Collect().Select(BuildDocumentResolver);
+
+        IncrementalValueProvider<GenerationContext> generationContext = documentResolver.Combine(globalOptions)
+            .Select((r, c) => new GenerationContext(r.Left, r.Right));
 
         IncrementalValuesProvider<GenerationSpecification> generationSpecifications =
             initializationContext.SyntaxProvider.ForAttributeWithMetadataName(
                 "Corvus.Json.JsonSchemaTypeGeneratorAttribute",
                 IsValidAttributeTarget,
-                BuildGenerationSpecifications);
+                BuildGenerationSpecifications
+            );
 
-        IncrementalValueProvider<TypesToGenerate> typesToGenerate = generationSpecifications.Collect().Combine(generationContext).Select((c, t) => new TypesToGenerate(c.Left, c.Right));
+        IncrementalValueProvider<TypesToGenerate> typesToGenerate = generationSpecifications.Collect()
+            .Combine(generationContext).Select((c, t) => new TypesToGenerate(c.Left, c.Right));
 
-        initializationContext.RegisterSourceOutput(typesToGenerate, GenerateCode);
+        typesToGenerate
+            .SelectAndReportExceptions(GenerateCode, initializationContext)
+            .SelectAndReportDiagnostics(initializationContext)
+            .AddSource(initializationContext);
     }
 
     private bool IsValidAttributeTarget(SyntaxNode node, CancellationToken token)
@@ -76,47 +107,35 @@ public class CorvusSourceGenerator : IIncrementalGenerator
             structDeclarationSyntax
                 .Modifiers
                 .Any(m => m.IsKind(SyntaxKind.PartialKeyword)) &&
-            structDeclarationSyntax.Parent is (FileScopedNamespaceDeclarationSyntax or NamespaceDeclarationSyntax);
+            structDeclarationSyntax.Parent is FileScopedNamespaceDeclarationSyntax or NamespaceDeclarationSyntax;
     }
 
-    private static void GenerateCode(SourceProductionContext context, TypesToGenerate generationSource)
+    private static ResultWithDiagnostics<EquatableArray<FileWithName>> GenerateCode(
+        TypesToGenerate generationSource, CancellationToken cancellationToken
+    )
     {
         if (generationSource.GenerationSpecifications.Length == 0)
         {
             // Nothing to generate
-            return;
+            return new ResultWithDiagnostics<EquatableArray<FileWithName>>(ImmutableArray<FileWithName>.Empty.AsEquatableArray());
         }
 
         List<TypeDeclaration> typesToGenerate = [];
         List<CSharpLanguageProvider.NamedType> namedTypes = [];
         JsonSchemaTypeBuilder typeBuilder = new(generationSource.DocumentResolver, VocabularyRegistry);
 
-
+        var diagnostics = new List<Diagnostic>();
         foreach (GenerationSpecification spec in generationSource.GenerationSpecifications)
         {
-            if (context.CancellationToken.IsCancellationRequested)
-            {
-                return;
-            }
+            cancellationToken.ThrowIfCancellationRequested();
 
             string schemaFile = spec.Location;
             JsonReference reference = new(schemaFile);
-            TypeDeclaration rootType;
-            try
-            {
-                rootType = typeBuilder.AddTypeDeclarations(reference, generationSource.FallbackVocabulary, spec.RebaseToRootPath, context.CancellationToken);
-            }
-            catch (Exception ex)
-            {
-                context.ReportDiagnostic(
-                    Diagnostic.Create(
-                        Crv1000ErrorAddingTypeDeclarations,
-                        Location.None,
-                        reference,
-                        ex.Message));
 
-                return;
-            }
+            var rootType = typeBuilder.AddTypeDeclarations(
+                reference, generationSource.FallbackVocabulary,
+                spec.RebaseToRootPath, cancellationToken
+            );
 
             typesToGenerate.Add(rootType);
 
@@ -138,56 +157,39 @@ public class CorvusSourceGenerator : IIncrementalGenerator
 
         var languageProvider = CSharpLanguageProvider.DefaultWithOptions(options);
 
-        IReadOnlyCollection<GeneratedCodeFile> generatedCode;
+        var generatedCode = typeBuilder.GenerateCodeUsing(
+            languageProvider,
+            cancellationToken,
+            typesToGenerate
+        ).Select(x => new FileWithName(x.FileName, x.FileName)).ToImmutableArray();
 
-        try
-        {
-            generatedCode =
-                typeBuilder.GenerateCodeUsing(
-                    languageProvider,
-                    context.CancellationToken,
-                    typesToGenerate);
-        }
-        catch (Exception ex)
-        {
-            context.ReportDiagnostic(
-                Diagnostic.Create(
-                    Crv1001ErrorGeneratingCSharpCode,
-                    Location.None,
-                    ex.Message));
-
-            return;
-        }
-
-        foreach (GeneratedCodeFile codeFile in generatedCode)
-        {
-            if (!context.CancellationToken.IsCancellationRequested)
-            {
-                context.AddSource(codeFile.FileName, SourceText.From(codeFile.FileContent, Encoding.UTF8));
-            }
-        }
+        return new ResultWithDiagnostics<EquatableArray<FileWithName>>(
+            generatedCode.AsEquatableArray(),
+            diagnostics.ToImmutableArray().AsEquatableArray()
+        );
     }
 
-    private static GenerationSpecification BuildGenerationSpecifications(GeneratorAttributeSyntaxContext context, CancellationToken token)
+    private static GenerationSpecification BuildGenerationSpecifications(
+        GeneratorAttributeSyntaxContext context, CancellationToken token
+    )
     {
         AttributeData attribute = context.Attributes[0];
-        string location = attribute.ConstructorArguments[0].Value as string ?? throw new InvalidOperationException("Location is required");
+        string location = attribute.ConstructorArguments[0].Value as string ??
+                          throw new InvalidOperationException("Location is required");
 
-        if (TryNormalizeSchemaReference(location, Path.GetDirectoryName(context.TargetNode.SyntaxTree.FilePath), out string? normalizedLocation))
-        {
-            location = normalizedLocation;
-        }
+        bool rebaseToRootPath = attribute.ConstructorArguments[1].Value as bool? ?? false;
 
-        bool rebaseToRootPath = attribute.ConstructorArguments[0].Value as bool? ?? false;
-
-
-        return new(context.TargetSymbol.Name, context.TargetSymbol.ContainingNamespace.ToDisplayString(), location, rebaseToRootPath);
+        return new(
+            context.TargetSymbol.Name, context.TargetSymbol.ContainingNamespace.ToDisplayString(), location,
+            rebaseToRootPath
+        );
     }
 
     private static GlobalOptions GetGlobalOptions(AnalyzerConfigOptionsProvider source, CancellationToken token)
     {
         IVocabulary fallbackVocabulary = CodeGeneration.Draft202012.VocabularyAnalyser.DefaultVocabulary;
-        if (source.GlobalOptions.TryGetValue("build_property.CorvusJsonSchemaFallbackVocabulary", out string? fallbackVocabularyName))
+        if (source.GlobalOptions.TryGetValue("build_property.CorvusJsonSchemaFallbackVocabulary",
+                out string? fallbackVocabularyName))
         {
             fallbackVocabulary = fallbackVocabularyName switch
             {
@@ -200,58 +202,64 @@ public class CorvusSourceGenerator : IIncrementalGenerator
                 _ => CodeGeneration.Draft202012.VocabularyAnalyser.DefaultVocabulary,
             };
         }
+
         bool optionalAsNullable = true;
 
-        if (source.GlobalOptions.TryGetValue("build_property.CorvusJsonSchemaOptionalAsNullable", out string? optionalAsNullableName))
+        if (source.GlobalOptions.TryGetValue("build_property.CorvusJsonSchemaOptionalAsNullable",
+                out string? optionalAsNullableName))
         {
             optionalAsNullable = optionalAsNullableName == "NullOrUndefined";
         }
 
         bool useOptionalNameHeuristics = true;
 
-        if (source.GlobalOptions.TryGetValue("build_property.CorvusJsonSchemaUseOptionalNameHeuristics", out string? useOptionalNameHeuristicsName))
+        if (source.GlobalOptions.TryGetValue("build_property.CorvusJsonSchemaUseOptionalNameHeuristics",
+                out string? useOptionalNameHeuristicsName))
         {
-            useOptionalNameHeuristics = useOptionalNameHeuristicsName == "true" || useOptionalNameHeuristicsName == "True";
+            useOptionalNameHeuristics =
+                useOptionalNameHeuristicsName == "true" || useOptionalNameHeuristicsName == "True";
         }
 
         bool alwaysAssertFormat = true;
 
-        if (source.GlobalOptions.TryGetValue("build_property.CorvusJsonSchemaAlwaysAssertFormat", out string? alwaysAssertFormatName))
+        if (source.GlobalOptions.TryGetValue("build_property.CorvusJsonSchemaAlwaysAssertFormat",
+                out string? alwaysAssertFormatName))
         {
             alwaysAssertFormat = alwaysAssertFormatName == "true" || alwaysAssertFormatName == "True";
         }
 
         ImmutableArray<string>? disabledNamingHeuristics = null;
 
-        if (source.GlobalOptions.TryGetValue("build_property.CorvusJsonSchemaDisabledNamingHeuristics", out string? disabledNamingHeuristicsSemicolonSeparated))
+        if (source.GlobalOptions.TryGetValue("build_property.CorvusJsonSchemaDisabledNamingHeuristics",
+                out string? disabledNamingHeuristicsSemicolonSeparated))
         {
-            string[] disabledNames = disabledNamingHeuristicsSemicolonSeparated.Split([';'], StringSplitOptions.RemoveEmptyEntries);
+            string[] disabledNames =
+                disabledNamingHeuristicsSemicolonSeparated.Split([';'], StringSplitOptions.RemoveEmptyEntries);
 
             disabledNamingHeuristics = disabledNames.Select(d => d.Trim()).ToImmutableArray();
         }
 
-        return new(fallbackVocabulary, optionalAsNullable, useOptionalNameHeuristics, alwaysAssertFormat, disabledNamingHeuristics ?? DefaultDisabledNamingHeuristics);
+        return new(fallbackVocabulary, optionalAsNullable, useOptionalNameHeuristics, alwaysAssertFormat,
+            disabledNamingHeuristics ?? DefaultDisabledNamingHeuristics);
     }
 
-    private static CompoundDocumentResolver BuildDocumentResolver(ImmutableArray<AdditionalText> source, CancellationToken token)
+    private static CompoundDocumentResolver BuildDocumentResolver(
+        ImmutableArray<InlinedSource> sources, CancellationToken token
+    )
     {
         PrepopulatedDocumentResolver newResolver = new();
-        foreach (AdditionalText additionalText in source)
+        foreach (var source in sources)
         {
             if (token.IsCancellationRequested)
             {
                 return new CompoundDocumentResolver();
             }
 
-            string? json = additionalText.GetText(token)?.ToString();
-            if (json is string j)
-            {
-                var doc = JsonDocument.Parse(j);
-                if (TryNormalizeSchemaReference(additionalText.Path, string.Empty, out string? normalizedReference))
-                {
-                    newResolver.AddDocument(normalizedReference, doc);
-                }
-            }
+            var json = source.Content.ToString();
+
+            var doc = JsonDocument.Parse(json);
+
+            newResolver.AddDocument(source.InlineSource, doc);
         }
 
         return new CompoundDocumentResolver(newResolver, MetaSchemaResolver);
@@ -283,7 +291,10 @@ public class CorvusSourceGenerator : IIncrementalGenerator
         return vocabularyRegistry;
     }
 
-    private static bool TryNormalizeSchemaReference(string schemaFile, string basePath, [NotNullWhen(true)] out string? result)
+    private static bool TryNormalizeSchemaReference(
+        string schemaFile, string basePath,
+        [NotNullWhen(true)] out string? result
+    )
     {
         JsonUri value2 = new JsonUri(schemaFile);
         if (!value2.IsValid() || value2.GetUri().IsFile)
@@ -304,6 +315,7 @@ public class CorvusSourceGenerator : IIncrementalGenerator
 
         result = null;
         return false;
+
         static bool IsDirectorySeparator(char c)
         {
             if (c != Path.DirectorySeparatorChar)
@@ -365,12 +377,12 @@ public class CorvusSourceGenerator : IIncrementalGenerator
                             this.Location = location;
                             this.RebaseToRootPath = rebaseToRootPath;
                         }
-
+                    
                         /// <summary>
                         /// Gets the location for the JSON schema.
                         /// </summary>
                         public string Location { get; }
-
+                    
                         /// <summary>
                         /// Gets a value indicating whether to rebase to the root path.
                         /// </summary>
@@ -423,7 +435,12 @@ public class CorvusSourceGenerator : IIncrementalGenerator
         public bool AlwaysAssertFormat { get; } = right.AlwaysAssertFormat;
     }
 
-    private readonly struct GlobalOptions(IVocabulary fallbackVocabulary, bool optionalAsNullable, bool useOptionalNameHeuristics, bool alwaysAssertFormat, ImmutableArray<string> disabledNamingHeuristics)
+    private readonly struct GlobalOptions(
+        IVocabulary fallbackVocabulary,
+        bool optionalAsNullable,
+        bool useOptionalNameHeuristics,
+        bool alwaysAssertFormat,
+        ImmutableArray<string> disabledNamingHeuristics)
     {
         public IVocabulary FallbackVocabulary { get; } = fallbackVocabulary;
 
