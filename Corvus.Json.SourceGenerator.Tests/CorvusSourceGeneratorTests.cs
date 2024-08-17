@@ -12,7 +12,15 @@ public class CorvusSourceGeneratorTests
 
     [Fact]
     public Task SimpleWorks() => TestHelper.Verify<CorvusSourceGenerator>(
-        new DictionaryAnalyzerConfigOptionsProvider(),
+        new DictionaryAnalyzerConfigOptionsProvider(
+            additionalTextOptions: new Dictionary<string, Dictionary<string, string>>
+            {
+                [H.Resources.test_json.FileName] = new()
+                {
+                    ["CorvusSource"] = "https://corvus-oss.org/json-schema/2020-12/schema.json",
+                }
+            }
+        ),
         [
             H.Resources.test_json
         ],
@@ -21,7 +29,7 @@ public class CorvusSourceGeneratorTests
 
         using Corvus.Json;
 
-        [JsonSchemaTypeGenerator("../test.json")]
+        [JsonSchemaTypeGenerator("https://corvus-oss.org/json-schema/2020-12/schema.json")]
         public readonly partial struct FlimFlam;
         """
     );
