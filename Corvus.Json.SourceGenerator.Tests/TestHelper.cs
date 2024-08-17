@@ -1,11 +1,13 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.Serialization;
 using System.Text.Json;
 using System.Threading.Tasks;
+using H;
 using H.Generators.Tests.Extensions;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -15,20 +17,26 @@ namespace Corvus.Json.SourceGenerator.Tests;
 
 public static class TestHelper
 {
- public static Task Verify<TIncrementalGenerator>(
+    internal static Task Verify<TIncrementalGenerator>(
         [StringSyntax("csharp")] params string[] source
     ) where TIncrementalGenerator : class, IIncrementalGenerator, new() => Verify<TIncrementalGenerator>(
         new DictionaryAnalyzerConfigOptionsProvider(),
+        [],
         source
     );
 
-    public static Task Verify<TIncrementalGenerator>(
+    internal static Task Verify<TIncrementalGenerator>(
         DictionaryAnalyzerConfigOptionsProvider analyzerConfigOptionsProvider,
+        ImmutableArray<Resource> resources,
         [StringSyntax("csharp")] params string[] source
     ) where TIncrementalGenerator : class, IIncrementalGenerator, new()
     {
         // Parse the provided string into a C# syntax tree
         var syntaxTrees = source.Select(x => CSharpSyntaxTree.ParseText(x)).ToArray();
+
+        var texts = resources.Select(
+            x => new MemoryAdditionalText(x.FileName, x.AsString())
+        ).ToImmutableArray();
 
         // Create a Roslyn compilation for the syntax tree.
         var compilation = CSharpCompilation.Create(
@@ -51,7 +59,8 @@ public static class TestHelper
         // The GeneratorDriver is used to run our generator against a compilation
         GeneratorDriver driver = CSharpGeneratorDriver.Create(
             new[] { generator.AsSourceGenerator() },
-            optionsProvider: analyzerConfigOptionsProvider
+            optionsProvider: analyzerConfigOptionsProvider,
+            additionalTexts: texts
         );
 
         // Run the source generator!
@@ -61,8 +70,9 @@ public static class TestHelper
         return Verifier.Verify(driver);
     }
 
-
-    private static IEnumerable<string> GetLocationWithDependencies(Type type) => GetLocationWithDependencies(type.Assembly);
+    private static IEnumerable<string> GetLocationWithDependencies(
+        Type type
+    ) => GetLocationWithDependencies(type.Assembly);
 
     private static IEnumerable<string> GetLocationWithDependencies(Assembly assembly)
     {
