@@ -162,7 +162,7 @@ public class CorvusSourceGenerator : IIncrementalGenerator
             languageProvider,
             cancellationToken,
             typesToGenerate
-        ).Select(x => new FileWithName(x.FileName, x.FileName)).ToImmutableArray();
+        ).Select(x => new FileWithName(x.FileName, x.FileContent)).ToImmutableArray();
 
         return new ResultWithDiagnostics<EquatableArray<FileWithName>>(
             generatedCode.AsEquatableArray(),
