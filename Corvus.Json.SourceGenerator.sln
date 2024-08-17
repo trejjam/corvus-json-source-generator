@@ -7,7 +7,7 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Corvus.Json.SourceGenerator
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ConsumeGenerator", "ConsumeGenerator\ConsumeGenerator.csproj", "{F55E79B2-B9FE-4E04-8C94-0800C7ACC4EF}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Coruvs.Json.SourceGenerator.Tests", "Coruvs.Json.SourceGenerator.Tests\Coruvs.Json.SourceGenerator.Tests.csproj", "{DB5C6D3D-8D54-42ED-8048-E095C81D1678}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Corvus.Json.SourceGenerator.Tests", "Corvus.Json.SourceGenerator.Tests\Corvus.Json.SourceGenerator.Tests.csproj", "{DB5C6D3D-8D54-42ED-8048-E095C81D1678}"
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "SolutionFiles", "SolutionFiles", "{95E4B43D-B785-4C76-9A9E-F231010F374E}"
 	ProjectSection(SolutionItems) = preProject
