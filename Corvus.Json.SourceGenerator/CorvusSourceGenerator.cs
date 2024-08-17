@@ -2,26 +2,25 @@
 // Copyright (c) Endjin Limited. All rights reserved.
 // </copyright>
 
-using H.Generators.Extensions;
-
-namespace Corvus.Json.SourceGenerator;
-
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
-using System.Diagnostics.CodeAnalysis;
-using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
 using Corvus.Json.CodeGeneration;
+using Corvus.Json.CodeGeneration.CorvusVocabulary;
 using Corvus.Json.CodeGeneration.CSharp;
+using Corvus.Json.CodeGeneration.Draft202012;
+using H.Generators.Extensions;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.Text;
+
+namespace Corvus.Json.SourceGenerator;
 
 /// <summary>
 /// Base for a source generator.
@@ -117,7 +116,9 @@ public class CorvusSourceGenerator : IIncrementalGenerator
         if (generationSource.GenerationSpecifications.Length == 0)
         {
             // Nothing to generate
-            return new ResultWithDiagnostics<EquatableArray<FileWithName>>(ImmutableArray<FileWithName>.Empty.AsEquatableArray());
+            return new ResultWithDiagnostics<EquatableArray<FileWithName>>(
+                ImmutableArray<FileWithName>.Empty.AsEquatableArray()
+            );
         }
 
         List<TypeDeclaration> typesToGenerate = [];
@@ -187,19 +188,19 @@ public class CorvusSourceGenerator : IIncrementalGenerator
 
     private static GlobalOptions GetGlobalOptions(AnalyzerConfigOptionsProvider source, CancellationToken token)
     {
-        IVocabulary fallbackVocabulary = CodeGeneration.Draft202012.VocabularyAnalyser.DefaultVocabulary;
+        IVocabulary fallbackVocabulary = VocabularyAnalyser.DefaultVocabulary;
         if (source.GlobalOptions.TryGetValue("build_property.CorvusJsonSchemaFallbackVocabulary",
                 out string? fallbackVocabularyName))
         {
             fallbackVocabulary = fallbackVocabularyName switch
             {
-                "Draft202012" => CodeGeneration.Draft202012.VocabularyAnalyser.DefaultVocabulary,
+                "Draft202012" => VocabularyAnalyser.DefaultVocabulary,
                 "Draft201909" => CodeGeneration.Draft201909.VocabularyAnalyser.DefaultVocabulary,
                 "Draft7" => CodeGeneration.Draft7.VocabularyAnalyser.DefaultVocabulary,
                 "Draft6" => CodeGeneration.Draft6.VocabularyAnalyser.DefaultVocabulary,
                 "Draft4" => CodeGeneration.Draft4.VocabularyAnalyser.DefaultVocabulary,
                 "OpenApi30" => CodeGeneration.OpenApi30.VocabularyAnalyser.DefaultVocabulary,
-                _ => CodeGeneration.Draft202012.VocabularyAnalyser.DefaultVocabulary,
+                _ => VocabularyAnalyser.DefaultVocabulary,
             };
         }
 
@@ -277,7 +278,7 @@ public class CorvusSourceGenerator : IIncrementalGenerator
         VocabularyRegistry vocabularyRegistry = new();
 
         // Add support for the vocabularies we are interested in.
-        CodeGeneration.Draft202012.VocabularyAnalyser.RegisterAnalyser(documentResolver, vocabularyRegistry);
+        VocabularyAnalyser.RegisterAnalyser(documentResolver, vocabularyRegistry);
         CodeGeneration.Draft201909.VocabularyAnalyser.RegisterAnalyser(documentResolver, vocabularyRegistry);
         CodeGeneration.Draft7.VocabularyAnalyser.RegisterAnalyser(vocabularyRegistry);
         CodeGeneration.Draft6.VocabularyAnalyser.RegisterAnalyser(vocabularyRegistry);
@@ -286,75 +287,9 @@ public class CorvusSourceGenerator : IIncrementalGenerator
 
         // And register the custom vocabulary for Corvus extensions.
         vocabularyRegistry.RegisterVocabularies(
-            CodeGeneration.CorvusVocabulary.SchemaVocabulary.DefaultInstance);
+            SchemaVocabulary.DefaultInstance);
 
         return vocabularyRegistry;
-    }
-
-    private static bool TryNormalizeSchemaReference(
-        string schemaFile, string basePath,
-        [NotNullWhen(true)] out string? result
-    )
-    {
-        JsonUri value2 = new JsonUri(schemaFile);
-        if (!value2.IsValid() || value2.GetUri().IsFile)
-        {
-            if (IsPartiallyQualified(schemaFile.AsSpan()))
-            {
-                if (!string.IsNullOrEmpty(basePath))
-                {
-                    schemaFile = Path.Combine(basePath, schemaFile);
-                }
-
-                schemaFile = Path.GetFullPath(schemaFile);
-            }
-
-            result = schemaFile.Replace('\\', '/');
-            return true;
-        }
-
-        result = null;
-        return false;
-
-        static bool IsDirectorySeparator(char c)
-        {
-            if (c != Path.DirectorySeparatorChar)
-            {
-                return c == Path.AltDirectorySeparatorChar;
-            }
-
-            return true;
-        }
-
-        static bool IsPartiallyQualified(ReadOnlySpan<char> path)
-        {
-            if (path.Length < 2)
-            {
-                return true;
-            }
-
-            if (IsDirectorySeparator(path[0]))
-            {
-                if (path[1] != '?')
-                {
-                    return !IsDirectorySeparator(path[1]);
-                }
-
-                return false;
-            }
-
-            if (path.Length >= 3 && path[1] == Path.VolumeSeparatorChar && IsDirectorySeparator(path[2]))
-            {
-                return !IsValidDriveChar(path[0]);
-            }
-
-            return true;
-        }
-
-        static bool IsValidDriveChar(char value)
-        {
-            return (uint)((value | 0x20) - 97) <= 25u;
-        }
     }
 
     private static void EmitGeneratorAttribute(IncrementalGeneratorInitializationContext initializationContext)
@@ -390,66 +325,5 @@ public class CorvusSourceGenerator : IIncrementalGenerator
                     }
                     """, Encoding.UTF8));
         });
-    }
-
-    private readonly struct GenerationSpecification(string typeName, string ns, string location, bool rebaseToRootPath)
-    {
-        public string TypeName { get; } = typeName;
-
-        public string Namespace { get; } = ns;
-
-        public string Location { get; } = location;
-
-        public bool RebaseToRootPath { get; } = rebaseToRootPath;
-    }
-
-    private readonly struct GenerationContext(CompoundDocumentResolver left, GlobalOptions right)
-    {
-        public CompoundDocumentResolver DocumentResolver { get; } = left;
-
-        public IVocabulary FallbackVocabulary { get; } = right.FallbackVocabulary;
-
-        public bool OptionalAsNullable { get; } = right.OptionalAsNullable;
-
-        public bool UseOptionalNameHeuristics { get; } = right.UseOptionalNameHeuristics;
-
-        public ImmutableArray<string> DisabledNamingHeuristics { get; } = right.DisabledNamingHeuristics;
-
-        public bool AlwaysAssertFormat { get; } = right.AlwaysAssertFormat;
-    }
-
-    private readonly struct TypesToGenerate(ImmutableArray<GenerationSpecification> left, GenerationContext right)
-    {
-        public ImmutableArray<GenerationSpecification> GenerationSpecifications { get; } = left;
-
-        public CompoundDocumentResolver DocumentResolver { get; } = right.DocumentResolver;
-
-        public IVocabulary FallbackVocabulary { get; } = right.FallbackVocabulary;
-
-        public bool OptionalAsNullable { get; } = right.OptionalAsNullable;
-
-        public bool UseOptionalNameHeuristics { get; } = right.UseOptionalNameHeuristics;
-
-        public ImmutableArray<string> DisabledNamingHeuristics { get; } = right.DisabledNamingHeuristics;
-
-        public bool AlwaysAssertFormat { get; } = right.AlwaysAssertFormat;
-    }
-
-    private readonly struct GlobalOptions(
-        IVocabulary fallbackVocabulary,
-        bool optionalAsNullable,
-        bool useOptionalNameHeuristics,
-        bool alwaysAssertFormat,
-        ImmutableArray<string> disabledNamingHeuristics)
-    {
-        public IVocabulary FallbackVocabulary { get; } = fallbackVocabulary;
-
-        public bool OptionalAsNullable { get; } = optionalAsNullable;
-
-        public bool UseOptionalNameHeuristics { get; } = useOptionalNameHeuristics;
-
-        public ImmutableArray<string> DisabledNamingHeuristics { get; } = disabledNamingHeuristics;
-
-        public bool AlwaysAssertFormat { get; } = alwaysAssertFormat;
     }
 }
