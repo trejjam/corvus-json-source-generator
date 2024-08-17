@@ -24,8 +24,8 @@ using Microsoft.CodeAnalysis.Text;
 /// <summary>
 /// Base for a source generator.
 /// </summary>
-[Generator(LanguageNames.CSharp)]
-public class IncrementalSourceGenerator : IIncrementalGenerator
+[Generator]
+public class CorvusSourceGenerator : IIncrementalGenerator
 {
     private static readonly ImmutableArray<string> DefaultDisabledNamingHeuristics = ["DocumentationNameHeuristic"];
     private static readonly PrepopulatedDocumentResolver MetaSchemaResolver = CreateMetaSchemaResolver();
